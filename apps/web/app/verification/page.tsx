@@ -1,9 +1,14 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { VericoreClient, VericoreGuardrailError } from "@vericore/node-sdk";
 
 const CONFIRMATION_PHRASE = "I APPROVE THIS ACTION";
-const API_URL = "http://localhost:8080/api/v1/agent/action";
+
+const vericoreClient = new VericoreClient({
+  apiKey: "sk_test_123",
+  baseUrl: "http://localhost:8080/api/v1",
+});
 
 function bufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
@@ -96,16 +101,7 @@ export default function VerificationPage() {
     };
 
     try {
-      const res = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        setStatus({ type: "error", message: `${res.status}: ${text}` });
-        return;
-      }
+      await vericoreClient.executeAction(payload);
       setStatus({ type: "ok", message: "Action approved and recorded." });
       setQueue((prev) =>
         prev.map((q) => (q.id === selectedId ? { ...q, state: "approved" as const } : q))
@@ -113,7 +109,11 @@ export default function VerificationPage() {
       setConfirmationText("");
       setReasoning("");
     } catch (e) {
-      setStatus({ type: "error", message: (e as Error).message });
+      if (e instanceof VericoreGuardrailError) {
+        setStatus({ type: "error", message: `Guardrail blocked: ${e.message}` });
+      } else {
+        setStatus({ type: "error", message: (e as Error).message });
+      }
     }
   }, [selectedId, canApprove, queue, reasoning, requestWebAuthn]);
 

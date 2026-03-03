@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"v3r1c0r3.local/auth"
 )
 
 // W3C Trace Context: https://www.w3.org/TR/trace-context/#traceparent-header
@@ -40,6 +42,11 @@ type ActionPayload struct {
 	Params   json.RawMessage `json:"params"`
 }
 
+// AfterAppendFunc is called after a successful recorder.Append with the event ID and intent.
+// Used by the API to record event intents for Article 72 telemetry (e.g. audit_event_intents table).
+// May be nil.
+type AfterAppendFunc func(ctx context.Context, eventID, intent string)
+
 // AuditMiddleware wraps an http.Handler and intercepts every state-changing
 // request: it extracts the proposed action (intent, tool, params), builds an
 // AuditEvent, and calls recorder.Append. The request proceeds to the domain
@@ -53,7 +60,9 @@ type ActionPayload struct {
 //
 // AgentID is set from the optional X-Agent-ID request header; if missing,
 // defaultAgentID is used.
-func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.Handler) http.Handler {
+//
+// If afterAppend is non-nil, it is called after each successful Append with (ctx, event.ID, event.Intent).
+func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.Handler, afterAppend AfterAppendFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 1. Extract traceparent and inject into context.
 		traceparent := r.Header.Get(traceparentHeader)
@@ -83,6 +92,12 @@ func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.H
 			agentID = defaultAgentID
 		}
 
+		tenantID := auth.TenantIDFromContext(r.Context())
+		if tenantID == "" {
+			http.Error(w, "tenant context required", http.StatusInternalServerError)
+			return
+		}
+
 		// 3. Build AuditEvent.
 		eventID, err := generateEventID()
 		if err != nil {
@@ -99,6 +114,7 @@ func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.H
 		event := AuditEvent{
 			ID:           eventID,
 			Timestamp:    time.Now().UTC(),
+			TenantID:     tenantID,
 			AgentID:      agentID,
 			Intent:       payload.Intent,
 			ToolName:     payload.ToolName,
@@ -111,6 +127,9 @@ func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.H
 		if err != nil {
 			http.Error(w, "audit append failed", http.StatusInternalServerError)
 			return
+		}
+		if afterAppend != nil {
+			afterAppend(ctx, event.ID, event.Intent)
 		}
 
 		// 5. Audit succeeded; allow request to proceed.

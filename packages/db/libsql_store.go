@@ -15,7 +15,11 @@ type LibsqlStore struct {
 }
 
 // NewLibsqlStore returns a Store that uses the given DB for all MMR reads/writes.
+// The supplied db is the write pool: we serialize writes to avoid SQLITE_BUSY under
+// concurrency by limiting the pool to a single connection.
 func NewLibsqlStore(db *sql.DB) (*LibsqlStore, error) {
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := ensureMMRSchema(context.Background(), db); err != nil {
 		return nil, err
 	}
@@ -45,17 +49,21 @@ type libsqlTx struct {
 }
 
 func (t *libsqlTx) SaveLeaf(ctx context.Context, leaf flightrecorder.MMRLeaf) error {
+	tenantID := leaf.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
 	_, err := t.tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO mmr_leaves (id, mmr_index, event_id, hash) VALUES (?, ?, ?, ?)`,
-		leaf.ID, leaf.Index, leaf.EventID, leaf.Hash)
+		`INSERT OR REPLACE INTO mmr_leaves (id, mmr_index, event_id, hash, tenant_id) VALUES (?, ?, ?, ?, ?)`,
+		leaf.ID, leaf.Index, leaf.EventID, leaf.Hash, tenantID)
 	return err
 }
 
 func (t *libsqlTx) GetLeaf(ctx context.Context, id string) (flightrecorder.MMRLeaf, error) {
 	var leaf flightrecorder.MMRLeaf
 	err := t.tx.QueryRowContext(ctx,
-		`SELECT id, mmr_index, event_id, hash FROM mmr_leaves WHERE id = ?`,
-		id).Scan(&leaf.ID, &leaf.Index, &leaf.EventID, &leaf.Hash)
+		`SELECT id, mmr_index, event_id, hash, tenant_id FROM mmr_leaves WHERE id = ?`,
+		id).Scan(&leaf.ID, &leaf.Index, &leaf.EventID, &leaf.Hash, &leaf.TenantID)
 	return leaf, err
 }
 
@@ -98,7 +106,7 @@ func (t *libsqlTx) GetNextIndex(ctx context.Context) (uint64, error) {
 
 func (t *libsqlTx) SaveNextIndex(ctx context.Context, next uint64) error {
 	_, err := t.tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO mmr_meta (k, next_index) VALUES ('next', ?)`, next)
+		`INSERT OR REPLACE INTO mmr_meta (k, next_index, tenant_id) VALUES ('next', ?, 'default')`, next)
 	return err
 }
 
@@ -111,8 +119,8 @@ func (t *libsqlTx) SaveNode(ctx context.Context, hash, leftHash, rightHash []byt
 
 func ensureMMRSchema(ctx context.Context, db *sql.DB) error {
 	for _, q := range []string{
-		`CREATE TABLE IF NOT EXISTS mmr_meta (k TEXT PRIMARY KEY, next_index INTEGER NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS mmr_leaves (id TEXT PRIMARY KEY, mmr_index INTEGER NOT NULL, event_id TEXT NOT NULL, hash BLOB NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS mmr_meta (k TEXT PRIMARY KEY, next_index INTEGER NOT NULL, tenant_id TEXT NOT NULL DEFAULT 'default')`,
+		`CREATE TABLE IF NOT EXISTS mmr_leaves (id TEXT PRIMARY KEY, mmr_index INTEGER NOT NULL, event_id TEXT NOT NULL, hash BLOB NOT NULL, tenant_id TEXT NOT NULL DEFAULT 'default')`,
 		`CREATE TABLE IF NOT EXISTS mmr_peaks (ord INTEGER PRIMARY KEY, hash BLOB NOT NULL, height INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS mmr_nodes (hash BLOB PRIMARY KEY, left_hash BLOB NOT NULL, right_hash BLOB NOT NULL)`,
 	} {
@@ -120,6 +128,6 @@ func ensureMMRSchema(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO mmr_meta (k, next_index) VALUES ('next', 0)`)
+	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO mmr_meta (k, next_index, tenant_id) VALUES ('next', 0, 'default')`)
 	return err
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	_ "modernc.org/sqlite"
+	"v3r1c0r3.local/auth"
 	"v3r1c0r3.local/db"
 	"v3r1c0r3.local/guardrails"
 	"v3r1c0r3.local/mcp-flight-recorder"
@@ -40,6 +41,16 @@ func main() {
 	}
 	defer replica.Close()
 
+	if err := EnsureAuditEventIntentsTable(context.Background(), primary); err != nil {
+		log.Fatalf("ensure audit_event_intents: %v", err)
+	}
+	if err := EnsureAPIKeysTable(context.Background(), primary); err != nil {
+		log.Fatalf("ensure api_keys: %v", err)
+	}
+	if err := EnsureFinopsTables(context.Background(), primary); err != nil {
+		log.Fatalf("ensure finops tables: %v", err)
+	}
+
 	store, err := db.NewLibsqlStore(primary)
 	if err != nil {
 		log.Fatalf("new libsql store: %v", err)
@@ -48,6 +59,10 @@ func main() {
 	recorder := flightrecorder.NewFlightRecorder(nil, store)
 	validator := guardrails.NewStrictSchemaValidator()
 
+	afterAppend := func(ctx context.Context, eventID, intent string) {
+		RecordAuditIntent(ctx, primary, eventID, intent, auth.TenantIDFromContext(ctx))
+	}
+
 	r := chi.NewRouter()
 
 	// L7 Route Health Injection: strict, stateless health that pings the DB write pool.
@@ -55,9 +70,48 @@ func main() {
 
 	r.Get("/ready", readinessHandler())
 
-	// Integrity boundary: audit before proceed. Guardrail: kill-switch before RYOW.
+	r.Get("/api/v1/telemetry/stats", telemetryStatsHandler(primary))
+
+	keyValidator := &apiKeyValidator{db: primary}
+	// Tenant auth then audit: API key required, then integrity boundary and guardrail.
 	actionHandler := http.HandlerFunc(agentActionHandler(primary, replica, recorder, validator))
-	r.Post("/api/v1/agent/action", flightrecorder.AuditMiddleware(recorder, defaultAgentID, actionHandler).ServeHTTP)
+	audited := flightrecorder.AuditMiddleware(recorder, defaultAgentID, actionHandler, afterAppend)
+	actionWithAuth := auth.TenantAuthMiddleware(keyValidator, audited)
+	r.Post("/api/v1/agent/action", func(w http.ResponseWriter, r *http.Request) { actionWithAuth.ServeHTTP(w, r) })
+
+	// Developer portal: list and create API keys (requires tenant auth).
+	portalKeysHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			handlePortalKeysCreate(primary).ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			handlePortalKeysList(primary).ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+	portalWithAuth := auth.TenantAuthMiddleware(keyValidator, portalKeysHandler)
+	r.Get("/api/v1/portal/keys", func(w http.ResponseWriter, r *http.Request) { portalWithAuth.ServeHTTP(w, r) })
+	r.Post("/api/v1/portal/keys", func(w http.ResponseWriter, r *http.Request) { portalWithAuth.ServeHTTP(w, r) })
+
+	// FinOps: propose transfer (high-stakes interceptor: auto-execute below $1M, hold for FIDO2 above).
+	finopsProposeHandler := transferProposeHandler(primary, recorder)
+	finopsProposeWithAuth := auth.TenantAuthMiddleware(keyValidator, finopsProposeHandler)
+	r.Post("/api/v1/finops/transfer/propose", func(w http.ResponseWriter, r *http.Request) { finopsProposeWithAuth.ServeHTTP(w, r) })
+	// FinOps: list accounts and transfers for CFO dashboard.
+	finopsAccountsWithAuth := auth.TenantAuthMiddleware(keyValidator, finopsAccountsHandler(primary))
+	finopsTransfersWithAuth := auth.TenantAuthMiddleware(keyValidator, finopsTransfersHandler(primary))
+	r.Get("/api/v1/finops/accounts", func(w http.ResponseWriter, r *http.Request) { finopsAccountsWithAuth.ServeHTTP(w, r) })
+	r.Get("/api/v1/finops/transfers", func(w http.ResponseWriter, r *http.Request) { finopsTransfersWithAuth.ServeHTTP(w, r) })
+
+	// HealthTech: ZKP triage (PHI stays in enclave; only receipt + journal audited).
+	zkHealthBin := os.Getenv("ZK_HEALTH_BIN")
+	if zkHealthBin == "" {
+		zkHealthBin = "zk-health"
+	}
+	triageWithAuth := auth.TenantAuthMiddleware(keyValidator, triageHandler(primary, recorder, zkHealthBin))
+	r.Post("/api/v1/healthtech/triage", func(w http.ResponseWriter, r *http.Request) { triageWithAuth.ServeHTTP(w, r) })
 
 	addr := os.Getenv("API_ADDR")
 	if addr == "" {
@@ -128,13 +182,19 @@ func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.Flight
 				interventionEvent := flightrecorder.AuditEvent{
 					ID:           eventID,
 					Timestamp:    time.Now().UTC(),
+					TenantID:     auth.TenantIDFromContext(r.Context()),
 					AgentID:      defaultAgentID,
 					Intent:       "guardrail_intervention_blocked",
 					ToolName:     "StrictSchemaValidator",
 					ParamsJSON:   paramsJSON,
 					EnvelopeHash: hex.EncodeToString(h[:]),
 				}
-				_, _ = recorder.Append(r.Context(), interventionEvent)
+				if _, appendErr := recorder.Append(r.Context(), interventionEvent); appendErr != nil {
+					log.Printf("guardrail_intervention_blocked: MMR append failed: %v", appendErr)
+				} else {
+					log.Printf("guardrail_intervention_blocked: event %s appended to MMR (Article 72); returning 403", eventID)
+					RecordAuditIntent(r.Context(), primary, eventID, "guardrail_intervention_blocked", auth.TenantIDFromContext(r.Context()))
+				}
 				http.Error(w, err.Error(), http.StatusForbidden)
 			} else {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -158,6 +218,12 @@ func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.Flight
 			payload.ExpectedState = "committed"
 		}
 
+		// LSN-wait simulation: force replica to lag so WaitForCommit times out and we fall back to primary.
+		if r.Header.Get("X-RYOW-Simulate-Lag") == "true" || r.Header.Get("X-RYOW-Simulate-Lag") == "1" {
+			_, _ = replica.ExecContext(r.Context(), `UPDATE verification_queue SET state = 'pending' WHERE id = ?`, payload.RecordID)
+			log.Printf("ryow: simulation: replica forced to state=pending for record %s (expected=%s), will timeout and fall back to primary", payload.RecordID, payload.ExpectedState)
+		}
+
 		ctx := r.Context()
 		err = db.ExecuteWithFallback(ctx, replica, primary, payload.RecordID, payload.ExpectedState, ryowTimeout, func(d *sql.DB) error {
 			_, err := d.ExecContext(ctx, `UPDATE verification_queue SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, payload.RecordID)
@@ -166,6 +232,12 @@ func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.Flight
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		// CFO FinOps: settle high-stakes transfer when expected_state is CFO_APPROVAL.
+		if payload.ExpectedState == "CFO_APPROVAL" {
+			if settleErr := SettleTransferByVerificationQueueID(ctx, primary, payload.RecordID); settleErr != nil {
+				log.Printf("finops settle after CFO_APPROVAL: %v", settleErr)
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))

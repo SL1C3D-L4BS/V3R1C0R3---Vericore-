@@ -1,0 +1,25 @@
+# Kamal destination: Web role (Next.js). Use: kamal deploy -d web
+# Traefik routes vericore.com to this service.
+
+service: vericore-web
+image: your-registry.com/vericore-web
+
+servers:
+  web:
+    hosts:
+      - 10.0.0.1
+    traefik: true
+    labels:
+      traefik.http.routers.vericore-web.rule: Host(`vericore.com`)
+      traefik.http.routers.vericore-web.entrypoints: web
+      traefik.http.services.vericore-web.loadbalancer.server.port: "3000"
+
+healthcheck:
+  path: /
+  port: 3000
+  interval: 10
+  timeout: 5
+
+env:
+  clear:
+    NODE_ENV: production

@@ -9,19 +9,25 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "^15.3.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "@vericore/node-sdk": "workspace:*",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/context-zone": "^2.5.1",
+    "@opentelemetry/instrumentation": "^0.212.0",
     "@opentelemetry/instrumentation-fetch": "^0.212.0",
     "@opentelemetry/sdk-trace-web": "^2.5.1",
-    "@opentelemetry/instrumentation": "^0.212.0"
+    "chart.js": "^4.5.1",
+    "next": "^15.3.0",
+    "react": "^19.0.0",
+    "react-chartjs-2": "^5.3.1",
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
     "typescript": "^5"
   }
 }

@@ -19,6 +19,9 @@ type AuditEvent struct {
 	// Timestamp is the wall-clock time at which the audited operation occurred.
 	Timestamp time.Time `json:"timestamp"`
 
+	// TenantID identifies the tenant (B2B API key scope). Set from request context by AuditMiddleware.
+	TenantID string `json:"tenant_id"`
+
 	// AgentID identifies the in-process agent or subsystem responsible for
 	// the operation (e.g. "cursor", "guardrails", or a concrete agent name).
 	AgentID string `json:"agent_id"`
@@ -64,6 +67,9 @@ type MMRLeaf struct {
 	// Index is the monotonic position of this leaf within the logical
 	// append-only sequence.
 	Index uint64 `json:"index"`
+
+	// TenantID identifies the tenant for multi-tenant isolation and querying.
+	TenantID string `json:"tenant_id"`
 
 	// EventID links this leaf back to the originating AuditEvent.ID.
 	EventID string `json:"event_id"`

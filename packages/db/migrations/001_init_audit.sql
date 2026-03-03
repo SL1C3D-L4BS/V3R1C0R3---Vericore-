@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
   receipt_ref          TEXT,
   guardrail_results    TEXT,
   identity_snapshot    TEXT,          -- immutable identity context (User ID, role, key id, etc.)
-  webauthn_signature   BLOB           -- hardware-backed approval signature
+  webauthn_signature   BLOB,          -- hardware-backed approval signature
+  tenant_id            TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events (timestamp);

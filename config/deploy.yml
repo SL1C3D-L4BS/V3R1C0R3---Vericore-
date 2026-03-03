@@ -1,0 +1,46 @@
+# Kamal deployment for Vericore OS (bare-metal).
+# Two roles: api (Go, port 8080) and web (Next.js, port 3000).
+# Traefik routes: api.vericore.com -> api, vericore.com -> web.
+#
+# Deploy API:  kamal deploy -d api   (uses config/deploy.api.yml)
+# Deploy Web:  kamal deploy -d web   (uses config/deploy.web.yml)
+# Build API:   docker build -f apps/api/Dockerfile -t $REGISTRY/vericore-api .
+# Build Web:   docker build -f apps/web/Dockerfile -t $REGISTRY/vericore-web .
+
+service: vericore
+
+image: your-registry.com/vericore-web
+
+registry:
+  username: kamal
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+  server: your-registry.com
+
+servers:
+  web:
+    hosts:
+      - 10.0.0.1
+    traefik: true
+  api:
+    hosts:
+      - 10.0.0.1
+    traefik: true
+
+traefik:
+  image: traefik:v2.10
+  host_port: 80
+  options:
+    publish:
+      - "80:80"
+      - "443:443"
+  args:
+    entryPoints.web.address: ":80"
+    entryPoints.websecure.address: ":443"
+    accesslog: true
+    accesslog.format: json
+    log.level: INFO
+
+env:
+  secret:
+    - KAMAL_REGISTRY_PASSWORD

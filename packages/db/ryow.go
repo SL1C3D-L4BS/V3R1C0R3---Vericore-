@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"time"
 )
 
@@ -51,7 +52,12 @@ func WaitForCommit(ctx context.Context, replicaDB *sql.DB, recordID string, expe
 			return err
 		}
 
-		// Not yet synced or not found: sleep with backoff then retry.
+		// Not yet synced or not found: log and sleep with backoff then retry.
+		got := interface{}(state)
+		if err != nil {
+			got = err
+		}
+		log.Printf("ryow: replica lagging, sleeping for %v (record=%s want=%s got=%v)", backoff, recordID, expectedState, got)
 		select {
 		case <-ctx.Done():
 			return ErrReplicaStale
@@ -76,10 +82,12 @@ func WaitForCommit(ctx context.Context, replicaDB *sql.DB, recordID string, expe
 func ExecuteWithFallback(ctx context.Context, replica *sql.DB, primary *sql.DB, recordID, expectedState string, timeout time.Duration, execFn func(db *sql.DB) error) error {
 	err := WaitForCommit(ctx, replica, recordID, expectedState, timeout)
 	if errors.Is(err, ErrReplicaStale) {
+		log.Printf("ryow: ErrReplicaStale caught, falling back to primary sqld")
 		return execFn(primary)
 	}
 	if err != nil {
 		return err
 	}
+	log.Printf("ryow: replica synced, executing on edge node")
 	return execFn(replica)
 }

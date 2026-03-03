@@ -3,158 +3,199 @@ package flightrecorder
 import (
 	"context"
 	"errors"
+	"time"
 )
 
+// appendRequest is sent by Append and processed by the batch worker.
+type appendRequest struct {
+	event   AuditEvent
+	resultCh chan appendResult
+}
+
+// appendResult is sent back to the caller on resultCh.
+type appendResult struct {
+	leaf MMRLeaf
+	err  error
+}
+
 // mmrFlightRecorder is a FlightRecorder implementation backed by a Merkle
-// Mountain Range (MMR). It is parameterised by an MMRHasher and a Store so
-// that hashing algorithms and persistence backends can be swapped without
-// modifying the core MMR logic.
+// Mountain Range (MMR). It uses a background batch worker to aggregate
+// appends and execute a single RunInTx per batch (up to 500 items or 50ms).
 type mmrFlightRecorder struct {
 	hasher MMRHasher
 	store  Store
+	reqCh  chan appendRequest
 }
 
+const (
+	batchChanBuffer = 1000
+	batchSizeMax    = 500
+	batchWindow     = 50 * time.Millisecond
+)
+
 // NewFlightRecorder constructs a new MMR-backed FlightRecorder. The storage
-// dependency is injected via the Store interface to preserve package
-// boundaries and avoid coupling to a specific database.
-//
-// NOTE: The recorder itself is stateless with respect to MMR index and peaks.
-// All state is fetched from and written back to the Store on each Append so
-// that the Go monolith remains strictly stateless behind BGP Anycast. The
-// Store implementation (e.g. LibSQL single-writer) is responsible for
-// serialization and transactional safety.
+// dependency is injected via the Store interface. A background batch worker
+// is started; handlers enqueue via reqCh and block on resultCh.
 func NewFlightRecorder(hasher MMRHasher, store Store) FlightRecorder {
 	if hasher == nil {
 		hasher = NewSHA256Hasher()
 	}
-	return &mmrFlightRecorder{
+	r := &mmrFlightRecorder{
 		hasher: hasher,
 		store:  store,
+		reqCh:  make(chan appendRequest, batchChanBuffer),
 	}
+	go r.batchWorker()
+	return r
 }
 
-// Append implements the Merkle Mountain Range append algorithm:
-//
-//  1. Hash the incoming AuditEvent to obtain a leaf hash.
-//  2. Construct an MMRLeaf with a monotonic Index and EventID.
-//  3. Merge with existing peaks of the same height, hashing parent nodes
-//     until the new peak is strictly smaller than the preceding peak.
-//  4. Persist the new leaf, internal nodes, updated peaks, and next index
-//     via Store.
-//
-// The cryptographic heart of the algorithm is the peak-merging loop:
-// peaks with matching heights are repeatedly combined into parents until
-// only one peak of each height remains.
+// Append enqueues the event and blocks until the batch worker processes it
+// or the context is cancelled.
 func (r *mmrFlightRecorder) Append(ctx context.Context, event AuditEvent) (MMRLeaf, error) {
 	if r.store == nil {
 		return MMRLeaf{}, errors.New("flightrecorder: store is nil")
 	}
 
-	var leaf MMRLeaf
+	resultCh := make(chan appendResult, 1)
+	req := appendRequest{event: event, resultCh: resultCh}
 
-	// Execute the full Read–Modify–Write sequence inside a single ACID
-	// transaction provided by the Store. This prevents interleaving of
-	// concurrent appends and keeps the Go layer stateless.
-	if err := r.store.RunInTx(ctx, func(ctx context.Context, tx StoreTx) error {
-		// Fetch current state from the Store so the recorder itself remains
-		// stateless across requests.
+	select {
+	case r.reqCh <- req:
+		// Enqueued; wait for result or cancellation.
+		select {
+		case res := <-resultCh:
+			return res.leaf, res.err
+		case <-ctx.Done():
+			return MMRLeaf{}, ctx.Err()
+		}
+	case <-ctx.Done():
+		return MMRLeaf{}, ctx.Err()
+	}
+}
+
+// batchWorker aggregates up to batchSizeMax requests or a batchWindow tick,
+// then runs a single RunInTx: fetch state once, process all items (peak-merge
+// and persist leaves/nodes), then write peaks and next index once.
+func (r *mmrFlightRecorder) batchWorker() {
+	ticker := time.NewTicker(batchWindow)
+	defer ticker.Stop()
+
+	var batch []appendRequest
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		r.processBatch(batch)
+		batch = nil
+	}
+
+	for {
+		select {
+		case req := <-r.reqCh:
+			batch = append(batch, req)
+			if len(batch) >= batchSizeMax {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// processBatch runs one RunInTx: GetNextIndex and GetPeaks once, then for
+// each request does the peak-merging math (SaveNode, SaveLeaf), updates
+// in-memory nextIndex and peaks, then SavePeaks and SaveNextIndex once.
+// Replies to each request's resultCh with the leaf or error.
+func (r *mmrFlightRecorder) processBatch(batch []appendRequest) {
+	ctx := context.Background()
+	results := make([]appendResult, len(batch))
+
+	err := r.store.RunInTx(ctx, func(ctx context.Context, tx StoreTx) error {
 		nextIndex, err := tx.GetNextIndex(ctx)
 		if err != nil {
 			return err
 		}
-
 		peaks, err := tx.GetPeaks(ctx)
 		if err != nil {
 			return err
 		}
 
-		leafHash, err := r.hasher.HashLeaf(event)
-		if err != nil {
-			return err
-		}
-
-		localLeaf := MMRLeaf{
-			ID:      event.ID,
-			Index:   nextIndex,
-			EventID: event.ID,
-			Hash:    leafHash,
-		}
-		nextIndex++
-
-		// Start with the new leaf as a height-0 peak.
-		currentHash := localLeaf.Hash
-		currentHeight := uint64(0)
-
-		// Peak-merging loop:
-		// While there exists a previous peak with the same height, merge the
-		// two peaks into their parent node and increase the height. This
-		// produces a canonical MMR forest where at most one tree exists per
-		// height.
-		for len(peaks) > 0 && peaks[len(peaks)-1].Height == currentHeight {
-			// Pop the last peak.
-			prev := peaks[len(peaks)-1]
-			peaks = peaks[:len(peaks)-1]
-
-			// Parent = H(prev.Hash || currentHash).
-			parentHash, err := r.hasher.HashNode(prev.Hash, currentHash)
+		for i := range batch {
+			event := batch[i].event
+			leafHash, err := r.hasher.HashLeaf(event)
 			if err != nil {
+				results[i] = appendResult{err: err}
+				return err
+			}
+			localLeaf := MMRLeaf{
+				ID:       event.ID,
+				Index:    nextIndex,
+				TenantID: event.TenantID,
+				EventID:  event.ID,
+				Hash:     leafHash,
+			}
+			nextIndex++
+
+			currentHash := localLeaf.Hash
+			currentHeight := uint64(0)
+
+			for len(peaks) > 0 && peaks[len(peaks)-1].Height == currentHeight {
+				prev := peaks[len(peaks)-1]
+				peaks = peaks[:len(peaks)-1]
+
+				parentHash, err := r.hasher.HashNode(prev.Hash, currentHash)
+				if err != nil {
+					results[i] = appendResult{err: err}
+					return err
+				}
+				if err := tx.SaveNode(ctx, parentHash, prev.Hash, currentHash); err != nil {
+					results[i] = appendResult{err: err}
+					return err
+				}
+
+				currentHash = parentHash
+				currentHeight++
+			}
+
+			peaks = append(peaks, Peak{
+				Hash:   currentHash,
+				Height: currentHeight,
+			})
+
+			if err := tx.SaveLeaf(ctx, localLeaf); err != nil {
+				results[i] = appendResult{err: err}
 				return err
 			}
 
-			// Persist the internal node so that inclusion proofs can be
-			// constructed later.
-			if err := tx.SaveNode(ctx, parentHash, prev.Hash, currentHash); err != nil {
-				return err
-			}
-
-			currentHash = parentHash
-			currentHeight++
-		}
-
-		// Append the resulting peak.
-		peaks = append(peaks, Peak{
-			Hash:   currentHash,
-			Height: currentHeight,
-		})
-
-		// Persist the leaf, peaks, and next index.
-		if err := tx.SaveLeaf(ctx, localLeaf); err != nil {
-			return err
+			results[i] = appendResult{leaf: localLeaf}
 		}
 
 		if err := tx.SavePeaks(ctx, peaks); err != nil {
 			return err
 		}
+		return tx.SaveNextIndex(ctx, nextIndex)
+	})
 
-		if err := tx.SaveNextIndex(ctx, nextIndex); err != nil {
-			return err
+	if err != nil {
+		for i := range results {
+			if results[i].err == nil {
+				results[i] = appendResult{err: err}
+			}
 		}
-
-		// Expose the leaf to the caller once the transaction succeeds.
-		leaf = localLeaf
-		return nil
-	}); err != nil {
-		return MMRLeaf{}, err
 	}
 
-	// Root Sealing hook:
-	// A production implementation should asynchronously publish the current
-	// MMR root (derived from persisted peaks and size metadata) to an
-	// external, immutable public anchor (e.g. transparency log or
-	// confidential blockchain) every N events (e.g. 10,000) or on a time
-	// schedule.
-	//
-	// TODO: integrate root sealing trigger when the logical leaf count
-	// (tracked in storage) reaches a configurable checkpoint interval.
-
-	return leaf, nil
+	for i, req := range batch {
+		select {
+		case req.resultCh <- results[i]:
+		default:
+			// resultCh is buffered(1); should not block
+		}
+	}
 }
 
 var errProofNotImplemented = errors.New("flightrecorder: inclusion proofs not implemented yet")
 
-// GenerateProof is currently a stub. Implementing full inclusion proofs
-// requires storing and traversing the internal MMR nodes, which is beyond
-// the scope of this phase.
+// GenerateProof is currently a stub.
 func (r *mmrFlightRecorder) GenerateProof(leafID string) (MMRInclusionProof, error) {
 	return MMRInclusionProof{}, errProofNotImplemented
 }

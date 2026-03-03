@@ -1,0 +1,17 @@
+[package]
+name = "zk-health-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host CLI for HealthTech ZKP triage: runs guest, outputs receipt + journal"
+
+[[bin]]
+name = "zk-health"
+path = "src/main.rs"
+
+[dependencies]
+risc0-zkvm = { version = "3.0", features = ["prove"] }
+zk-health-methods = { path = "../methods" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.21"
+bincode = "1.3"

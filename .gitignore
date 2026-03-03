@@ -11,7 +11,17 @@ node_modules/
 target/
 dist/
 *.db
+primary.db
+replica.db
 local.db
+api-chaos.log
+api-crucible.log
+# Binaries
+/api
+apps/api/api
+/load-test
+/load_test
+.turbo/
 
 # IDE / OS
 .idea/

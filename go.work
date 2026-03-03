@@ -3,8 +3,10 @@ go 1.22
 use (
 	.
 	./apps/api
+	./packages/auth
 	./packages/db
 	./packages/guardrails
 	./packages/mcp-flight-recorder
 	./packages/zkp
+	./scripts/load_test
 )

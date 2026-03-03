@@ -1,0 +1,30 @@
+# Cilium Tetragon tracing policy: Pillar 3 compliance.
+# Monitors the Vericore OS API binary (/app/api) and logs outbound network
+# connections to prove the API cannot be hijacked to exfiltrate data.
+#
+# Apply: kubectl apply -f config/tetragon-policy.yaml
+# Or with Tetragon CLI: tetragon -f config/tetragon-policy.yaml
+#
+# Events for outbound TCP connects from /app/api will be emitted; allowlist
+# expected targets (e.g. internal DB, audit endpoints) in your SIEM.
+
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: vericore-api-outbound
+spec:
+  kprobes:
+    # Hook inet_stream_connect to log outbound TCP connections from the API binary.
+    - call: "inet_stream_connect"
+      syscall: false
+      args:
+        - index: 0
+          type: "sock"
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - "/app/api"
+          matchActions:
+            - action: Post
+              rateLimit: "100/s"

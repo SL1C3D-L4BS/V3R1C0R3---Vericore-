@@ -1,0 +1,21 @@
+# Kamal destination: API role (Go). Use: kamal deploy -d api
+# Traefik routes api.vericore.com to this service.
+
+service: vericore-api
+image: your-registry.com/vericore-api
+
+servers:
+  api:
+    hosts:
+      - 10.0.0.1
+    traefik: true
+    labels:
+      traefik.http.routers.vericore-api.rule: Host(`api.vericore.com`)
+      traefik.http.routers.vericore-api.entrypoints: web
+      traefik.http.services.vericore-api.loadbalancer.server.port: "8080"
+
+healthcheck:
+  path: /health
+  port: 8080
+  interval: 10
+  timeout: 5
