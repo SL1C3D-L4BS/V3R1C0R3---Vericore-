@@ -1,0 +1,19 @@
+{
+  "name": "sl1c3d-l4bs-v3r1c0r3",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.14.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "build-zkp": "turbo run build-zkp",
+    "test": "turbo run test",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "turbo": "2.5.2"
+  }
+}

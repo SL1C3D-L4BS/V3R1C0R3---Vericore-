@@ -1,0 +1,19 @@
+# Env and secrets
+.env
+.env.local
+*.local
+
+# Dependencies
+node_modules/
+
+# Build / runtime
+.next/
+target/
+dist/
+*.db
+local.db
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

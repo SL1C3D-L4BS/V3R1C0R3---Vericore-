@@ -1,0 +1,10 @@
+go 1.22
+
+use (
+	.
+	./apps/api
+	./packages/db
+	./packages/guardrails
+	./packages/mcp-flight-recorder
+	./packages/zkp
+)

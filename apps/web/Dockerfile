@@ -1,0 +1,34 @@
+# Next.js standalone output: minimal production image.
+# Build from repo root: docker build -f apps/web/Dockerfile .
+
+# ---- Builder ----
+FROM node:22-alpine AS builder
+WORKDIR /build
+
+COPY package.json pnpm-workspace.yaml ./
+COPY apps/web/package.json apps/web/
+RUN corepack enable pnpm && pnpm install --frozen-lockfile
+
+COPY apps/web/ apps/web/
+RUN pnpm run build --filter=v3r1c0r3-web
+
+# ---- Runner ----
+FROM node:22-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=builder /build/apps/web/public ./public
+COPY --from=builder --chown=nextjs:nodejs /build/apps/web/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /build/apps/web/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+CMD ["node", "server.js"]

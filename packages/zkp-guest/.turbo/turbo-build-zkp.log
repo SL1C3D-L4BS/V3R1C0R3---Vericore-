@@ -1,0 +1,23 @@
+
+> zkp-guest@0.1.0 build-zkp /Users/thearchitect/Desktop/D3V/sl1c3d-l4bs-v3r1c0r3/packages/zkp-guest
+> cargo build --release
+
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.44
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling generic-array v0.14.7
+   Compiling autocfg v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling paste v1.0.15
+error[E0463]: can't find crate for `core`
+  |
+  = note: the `riscv32im-risc0-zkvm-elf` target may not be installed
+  = help: consider downloading the target with `rustup target add riscv32im-risc0-zkvm-elf`
+
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `typenum` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+ ELIFECYCLE  Command failed with exit code 101.
+ WARN   Local package.json exists, but node_modules missing, did you mean to install?

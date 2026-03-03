@@ -1,0 +1,12 @@
+---
+description: "Global architectural constraints for V3R1C0R3. Applies to all files."
+globs:
+  - "**/*"
+alwaysApply: true
+---
+# V3R1C0R3 Core Directives
+
+- **Integrity First:** Every state-changing operation MUST route through the `packages/mcp-flight-recorder`. No direct database writes from the web or API layers.
+- **Secrets Management:** NO static secrets. Never use `os.Getenv` or `process.env` for production keys. All secrets are injected dynamically via Infisical/SPIFFE at runtime.
+- **Cryptographic Blinding:** If a task touches `packages/zkp-guest`, plaintext PII is strictly forbidden from entering the zkVM as a public input.
+- **Strict Boundaries:** `mcp-flight-recorder` and `guardrails` are immutable internal packages.

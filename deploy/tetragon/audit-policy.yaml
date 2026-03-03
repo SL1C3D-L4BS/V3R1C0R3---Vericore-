@@ -1,0 +1,37 @@
+# Cilium Tetragon TracingPolicy: Audit mode only for the Go API binary.
+#
+# AUDIT MODE (Post only). This policy hooks process execution and file access
+# for /app/api and emits events only. It does NOT enforce or kill processes.
+#
+# IMPORTANT: Sigkill (Enforce mode) is strictly forbidden until the baseline
+# is established. Do not add matchActions with action Sigkill or switch to
+# Enforce until observability baseline and policy tuning are complete.
+# Enforcing before baseline risks "self-hostage" (blocking legitimate API).
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: v3r1c0r3-api-audit
+spec:
+  kprobes:
+    # Process execution: execve for the API binary.
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "filename"
+      selectors:
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/app/api"
+    # File access: openat for the API binary.
+    - call: "sys_openat"
+      syscall: true
+      args:
+        - index: 1
+          type: "string"
+      selectors:
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/app/api"

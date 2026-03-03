@@ -1,0 +1,15 @@
+[package]
+name = "zkp-guest"
+version = "0.1.0"
+edition = "2021"
+description = "RISC Zero zkVM guest: cryptographic blinding and high-stakes policy (no PII in journal)"
+
+[dependencies]
+risc0-zkvm = { version = "3.0", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

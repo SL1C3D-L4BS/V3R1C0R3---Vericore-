@@ -1,0 +1,9 @@
+{
+  "name": "zkp-guest",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RISC Zero zkVM guest (Rust); build via Turbo or cargo",
+  "scripts": {
+    "build-zkp": "cargo build --release"
+  }
+}

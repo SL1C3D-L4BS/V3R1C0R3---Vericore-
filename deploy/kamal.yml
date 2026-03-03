@@ -1,0 +1,48 @@
+# Kamal deployment for the Go API monolith.
+# Deploy with: kamal deploy (from repo root; ensure config/deploy.yml or -c deploy/kamal.yml).
+#
+# The API container runs as non-root (see Dockerfile USER nonroot).
+# Health check pings /health for L7 Route Health Injection (anycastd).
+
+service: v3r1c0r3-api
+
+image: your-registry.example.com/v3r1c0r3-api
+
+# Build from apps/api Dockerfile. Run kamal from repo root.
+builder:
+  dockerfile: apps/api/Dockerfile
+  context: .
+
+registry:
+  server: your-registry.example.com
+  username:
+    - KAMAL_REGISTRY_PASSWORD
+  password:
+    - secret: KAMAL_REGISTRY_PASSWORD
+
+servers:
+  web:
+    hosts:
+      - 10.0.0.1
+    labels:
+      traefik.http.routers.api.rule: Host(`api.example.com`)
+      traefik.http.services.api.loadbalancer.server.port: 8080
+
+# Health check: ping /health (required for zero-downtime and anycastd).
+healthcheck:
+  path: /health
+  port: 8080
+  interval: 10s
+  timeout: 5s
+  max_attempts: 3
+
+# Container runs as non-root (image uses distroless nonroot user).
+# Optionally pin user in Kamal 2 via options:
+# options:
+#   user: nonroot
+
+env:
+  clear:
+    API_ADDR: ":8080"
+  secret:
+    - KAMAL_REGISTRY_PASSWORD

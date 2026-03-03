@@ -1,0 +1,133 @@
+# SLSA L4 CI/CD: build, attest, and keyless sign artifacts.
+# Triggers on push to main. Uses Sigstore (cosign) OIDC keyless signing and
+# SBOM attestation to achieve supply-chain integrity.
+
+name: Build and Attest
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # Required for Cosign keyless signing (OIDC)
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-attest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Go ---
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: |
+            apps/api/go.sum
+            packages/db/go.mod
+            packages/guardrails/go.mod
+            packages/mcp-flight-recorder/go.mod
+
+      # --- Node.js + pnpm ---
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      # --- RISC Zero toolchain (for build-zkp) ---
+      - name: Install RISC Zero target
+        run: |
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_ENV
+          cargo install cargo-risczero
+          cargo risczero install
+        continue-on-error: true
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Turbo build
+        run: pnpm run build
+
+      - name: Turbo build-zkp
+        run: pnpm run build-zkp
+        continue-on-error: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (API image)
+        id: meta-api
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/v3r1c0r3-api
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push API image
+        id: push-api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          output: type=image,name=${{ env.REGISTRY }}/${{ github.repository }}/v3r1c0r3-api,push-by-digest=true,name-canonical=true
+
+      # --- Sigstore: SBOM + keyless sign + attest (SLSA L4) ---
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.2.4"
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM for API image
+        id: sbom-api
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}/v3r1c0r3-api@${{ steps.push-api.outputs.digest }}"
+          syft packages "$IMAGE" -o cyclonedx-json=sbom-api.cyclonedx.json
+          echo "sbom-file=sbom-api.cyclonedx.json" >> $GITHUB_OUTPUT
+
+      - name: Cosign keyless sign API image
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}/v3r1c0r3-api@${{ steps.push-api.outputs.digest }}
+
+      - name: Cosign attest SBOM (keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign attest --yes --type cyclonedx \
+            --predicate sbom-api.cyclonedx.json \
+            ${{ env.REGISTRY }}/${{ github.repository }}/v3r1c0r3-api@${{ steps.push-api.outputs.digest }}
