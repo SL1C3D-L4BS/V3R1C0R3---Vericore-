@@ -26,4 +26,5 @@ apps/api/api
 # IDE / OS
 .idea/
 .vscode/
+.cursor/
 .DS_Store
