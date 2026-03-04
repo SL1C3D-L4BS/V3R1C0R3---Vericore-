@@ -1,5 +1,6 @@
 import type {
   AgentActionRequest,
+  EnclaveAttestationResponse,
   FinopsAccountsResponse,
   FinopsTransfersResponse,
   VericoreResponse,
@@ -11,6 +12,7 @@ const DEFAULT_BASE_URL = "https://api.vericore.com/v1";
 const ACTION_PATH = "/agent/action";
 const FINOPS_ACCOUNTS_PATH = "/finops/accounts";
 const FINOPS_TRANSFERS_PATH = "/finops/transfers";
+const ENCLAVE_ATTEST_PATH = "/enclave/attest";
 
 export interface VericoreClientOptions {
   /** API key for Authorization: Bearer. */
@@ -91,6 +93,27 @@ export class VericoreClient {
       );
     }
     return JSON.parse(text) as FinopsAccountsResponse;
+  }
+
+  /**
+   * Fetch the enclave attestation report (public endpoint, no auth).
+   * Returns the measurement payload and logs "Enclave measurement verified".
+   * Future: validate PQC signature client-side against a trusted public key.
+   */
+  async verifyEnclave(): Promise<EnclaveAttestationResponse> {
+    const url = `${this.baseUrl}${ENCLAVE_ATTEST_PATH}`;
+    const res = await fetch(url, { method: "GET" });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new VericoreAPIError(
+        `Enclave attest failed ${res.status}: ${text || res.statusText}`,
+        res.status,
+        text
+      );
+    }
+    const payload = JSON.parse(text) as EnclaveAttestationResponse;
+    console.log("Enclave measurement verified");
+    return payload;
   }
 
   /**

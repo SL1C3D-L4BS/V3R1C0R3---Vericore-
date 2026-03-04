@@ -5,9 +5,11 @@ use (
 	./apps/api
 	./packages/auth
 	./packages/db
+	./packages/enclave
 	./packages/guardrails
 	./packages/kms
 	./packages/mcp-flight-recorder
+	./packages/mcp-proxy
 	./packages/pqc
 	./packages/telemetry
 	./packages/webhooks

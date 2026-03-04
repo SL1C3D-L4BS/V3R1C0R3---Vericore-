@@ -1,13 +1,53 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 const DEFAULT_API_KEY = process.env.NEXT_PUBLIC_PORTAL_DEMO_KEY || "sk_test_123";
 
+const CIPHER_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_";
+
 interface PortalKey {
   key_prefix: string;
   created_at: string;
+}
+
+function useCipherReveal(finalKey: string | null, durationMs = 800) {
+  const [display, setDisplay] = useState("");
+  const [revealed, setRevealed] = useState(false);
+
+  useEffect(() => {
+    if (!finalKey) {
+      setDisplay("");
+      setRevealed(false);
+      return;
+    }
+    setRevealed(false);
+    const len = finalKey.length;
+    let start = Date.now();
+    const interval = 40;
+    const scrambleFrames = Math.min(12, Math.floor(durationMs * 0.5 / interval));
+
+    let frame = 0;
+    const scrambleId = setInterval(() => {
+      frame++;
+      let s = "";
+      for (let i = 0; i < len; i++) {
+        s += CIPHER_CHARS[Math.floor(Math.random() * CIPHER_CHARS.length)];
+      }
+      setDisplay(s);
+      if (frame >= scrambleFrames) {
+        clearInterval(scrambleId);
+        setDisplay(finalKey);
+        setRevealed(true);
+      }
+    }, interval);
+
+    return () => clearInterval(scrambleId);
+  }, [finalKey, durationMs]);
+
+  return { display, revealed };
 }
 
 export default function PortalPage() {
@@ -18,6 +58,8 @@ export default function PortalPage() {
   const [generatedKey, setGeneratedKey] = useState<string | null>(null);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
+
+  const { display: revealedKeyDisplay, revealed } = useCipherReveal(generatedKey);
 
   const fetchKeys = useCallback(async () => {
     setLoading(true);
@@ -76,14 +118,14 @@ export default function PortalPage() {
   }, [generatedKey]);
 
   return (
-    <main style={{ padding: "2rem", maxWidth: "56rem" }}>
-      <h1 style={{ marginBottom: "0.5rem" }}>Developer Portal</h1>
-      <p style={{ marginBottom: "1.5rem", color: "#666" }}>
+    <main className="mx-auto max-w-3xl bg-[var(--bg)] p-8 text-[var(--text)]">
+      <h1 className="mb-2 text-2xl font-semibold">Developer Portal</h1>
+      <p className="mb-6 text-[var(--text-muted)]">
         Manage API keys for the Vericore OS multi-tenant API. Keys are hashed; the raw key is shown only once when created.
       </p>
 
-      <section style={{ marginBottom: "1.5rem" }}>
-        <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600 }}>
+      <section className="mb-6">
+        <label className="mb-2 block font-medium text-[var(--text-muted)]">
           API Key (used to authenticate portal requests)
         </label>
         <input
@@ -91,66 +133,71 @@ export default function PortalPage() {
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder="sk_test_..."
-          style={{ width: "100%", maxWidth: "24rem", padding: "0.5rem", fontSize: "1rem" }}
+          className="terminal-input w-full max-w-md rounded-lg border border-zinc-600 bg-zinc-800/80 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
           aria-label="API Key"
         />
       </section>
 
-      <section style={{ marginBottom: "1.5rem" }}>
+      <section className="mb-6">
         <button
           type="button"
           onClick={handleGenerate}
           disabled={generateLoading}
-          style={{
-            padding: "0.6rem 1.2rem",
-            fontSize: "1rem",
-            fontWeight: 600,
-            cursor: generateLoading ? "not-allowed" : "pointer",
-            opacity: generateLoading ? 0.6 : 1,
-          }}
+          className="rounded-lg bg-blue-600 px-4 py-2.5 font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {generateLoading ? "Generating…" : "Generate New API Key"}
         </button>
       </section>
 
-      {generatedKey && (
-        <section style={{ marginBottom: "1.5rem", padding: "1rem", background: "#f0f7ff", borderRadius: "8px", border: "1px solid #b3d4fc" }}>
-          <p style={{ marginBottom: "0.5rem", fontWeight: 600 }}>Your new API key (copy now — it won’t be shown again):</p>
-          <code style={{ display: "block", wordBreak: "break-all", marginBottom: "0.75rem", fontSize: "0.9rem" }}>
-            {generatedKey}
-          </code>
-          <button
-            type="button"
-            onClick={copyToClipboard}
-            style={{ padding: "0.4rem 0.8rem", fontSize: "0.9rem", cursor: "pointer" }}
+      <AnimatePresence mode="wait">
+        {generatedKey && (
+          <motion.section
+            key="generated"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="mb-6 rounded-xl border border-blue-500/30 bg-blue-500/10 p-5 backdrop-blur"
           >
-            {copyFeedback ? "Copied!" : "Copy to Clipboard"}
-          </button>
-        </section>
-      )}
+            <p className="mb-3 font-medium text-blue-200">
+              Your new API key (copy now — it won’t be shown again):
+            </p>
+            <motion.code
+              className="block break-all font-mono text-sm text-blue-100"
+              data-crypto
+              initial={{ opacity: 0.8 }}
+              animate={{ opacity: revealed ? 1 : 0.9 }}
+              transition={{ duration: 0.2 }}
+            >
+              {revealedKeyDisplay}
+            </motion.code>
+            <motion.button
+              type="button"
+              onClick={copyToClipboard}
+              className="mt-3 rounded-lg bg-blue-600/80 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500"
+            >
+              {copyFeedback ? "Copied!" : "Copy to Clipboard"}
+            </motion.button>
+          </motion.section>
+        )}
+      </AnimatePresence>
 
       <section>
-        <h2 style={{ marginBottom: "0.75rem", fontSize: "1rem" }}>Your active keys</h2>
+        <h2 className="mb-3 text-base font-medium text-[var(--text-muted)]">Your active keys</h2>
         {loading ? (
-          <p style={{ color: "#666" }}>Loading…</p>
+          <p className="text-[var(--text-muted)]">Loading…</p>
         ) : error ? (
-          <p style={{ color: "#c00" }}>{error}</p>
+          <p className="text-[var(--danger)]">{error}</p>
         ) : keys.length === 0 ? (
-          <p style={{ color: "#666" }}>No keys yet. Generate one above.</p>
+          <p className="text-[var(--text-muted)]">No keys yet. Generate one above.</p>
         ) : (
-          <ul style={{ listStyle: "none" }}>
+          <ul className="list-none space-y-2">
             {keys.map((k, i) => (
               <li
                 key={`${k.key_prefix}-${k.created_at}-${i}`}
-                style={{
-                  padding: "0.75rem 1rem",
-                  border: "1px solid #ddd",
-                  borderRadius: "6px",
-                  marginBottom: "0.5rem",
-                }}
+                className="rounded-lg border border-zinc-700/50 bg-zinc-800/30 px-4 py-3"
               >
-                <strong>{k.key_prefix}</strong>
-                <span style={{ marginLeft: "0.5rem", color: "#666" }}>created {k.created_at}</span>
+                <span className="font-mono font-medium text-zinc-200" data-crypto>{k.key_prefix}</span>
+                <span className="ml-2 text-sm text-[var(--text-muted)]">created {k.created_at}</span>
               </li>
             ))}
           </ul>

@@ -53,3 +53,11 @@ export interface FinopsAccountsResponse {
 export interface FinopsTransfersResponse {
   transfers: FinopsTransfer[];
 }
+
+/** Response from GET /api/v1/enclave/attest (TEE remote attestation). */
+export interface EnclaveAttestationResponse {
+  /** Platform Configuration Register 0 (e.g. SHA-384 hex or hardware PCR). */
+  pcr0: string;
+  /** Base64-encoded PQC signature over the measurement (for future client-side verification). */
+  enclave_signature: string;
+}

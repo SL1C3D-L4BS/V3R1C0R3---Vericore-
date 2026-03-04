@@ -22,6 +22,7 @@ servers:
     hosts:
       - 10.0.0.1
     traefik: true
+  # REQUIREMENT: Deploy to Confidential VMs (Intel TDX / AMD SEV-SNP) for hardware-level memory isolation.
   api:
     hosts:
       - 10.0.0.1

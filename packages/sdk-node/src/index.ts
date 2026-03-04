@@ -6,6 +6,7 @@ export { VericoreClient } from "./client.js";
 export type { VericoreClientOptions } from "./client.js";
 export type {
   AgentActionRequest,
+  EnclaveAttestationResponse,
   FinopsAccount,
   FinopsAccountsResponse,
   FinopsTransfer,

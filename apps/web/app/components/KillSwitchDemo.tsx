@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 const DANGEROUS_PATTERNS = [
   /drop\s+table/i,
@@ -53,9 +54,25 @@ export default function KillSwitchDemo() {
   );
 
   return (
-    <section className="rounded-xl border border-zinc-700/50 bg-zinc-900/50 p-6 backdrop-blur">
+    <motion.section
+      className="relative overflow-hidden rounded-2xl border bg-zinc-900/40 p-6 backdrop-blur-xl"
+      style={{
+        boxShadow: state === "blocked" ? "0 0 0 2px #ef4444, 0 0 24px rgba(239, 68, 68, 0.25)" : "0 0 0 1px rgba(255,255,255,0.06), 0 0 40px rgba(59, 130, 246, 0.06)",
+        borderColor: state === "blocked" ? "#ef4444" : "rgba(255,255,255,0.08)",
+      }}
+      animate={state === "blocked" ? { x: [-10, 10, -10, 10, 0] } : {}}
+      transition={{ type: "keyframes", duration: 0.4 }}
+    >
+      {/* macOS-style terminal chrome */}
+      <div className="mb-4 flex items-center gap-2">
+        <span className="h-3 w-3 rounded-full bg-red-500/80" />
+        <span className="h-3 w-3 rounded-full bg-amber-500/80" />
+        <span className="h-3 w-3 rounded-full bg-emerald-500/80" />
+        <span className="ml-2 font-mono text-xs text-zinc-500">Agent Terminal</span>
+      </div>
+
       <h2 className="mb-1 font-mono text-sm font-medium uppercase tracking-wider text-zinc-400">
-        Agent Terminal
+        Kill-Switch Demo
       </h2>
       <p className="mb-4 text-sm text-zinc-500">
         Simulated guardrail — try a safe action or a restricted one.
@@ -69,7 +86,7 @@ export default function KillSwitchDemo() {
             setState("idle");
           }}
           placeholder="Enter an agent action intent..."
-          className="w-full rounded-lg border border-zinc-600 bg-zinc-800/80 px-4 py-3 font-mono text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="terminal-input w-full rounded-lg border border-zinc-600/80 bg-zinc-800/80 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
           aria-label="Agent action intent"
         />
         <button
@@ -80,30 +97,42 @@ export default function KillSwitchDemo() {
         </button>
       </form>
 
-      {state === "approved" && (
-        <div
-          className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4"
-          role="status"
-        >
-          <p className="font-mono text-sm font-medium text-emerald-400">
-            Action Approved. Merkle Proof Generated:
-          </p>
-          <code className="mt-2 block break-all font-mono text-xs text-emerald-300/90">
-            {mockHash}
-          </code>
-        </div>
-      )}
+      <AnimatePresence mode="wait">
+        {state === "approved" && (
+          <motion.div
+            key="approved"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.25 }}
+            className="mt-4 overflow-hidden rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4"
+            role="status"
+          >
+            <p className="font-mono text-sm font-medium text-emerald-400">
+              Action Approved. Merkle Proof Generated:
+            </p>
+            <code className="mt-2 block break-all font-mono text-xs text-emerald-300/90" data-crypto>
+              {mockHash}
+            </code>
+          </motion.div>
+        )}
 
-      {state === "blocked" && (
-        <div
-          className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-4"
-          role="alert"
-        >
-          <p className="font-mono text-sm font-semibold text-red-400">
-            🛑 GUARDRAIL INTERVENTION. Action Blocked. Article 14 Log Appended.
-          </p>
-        </div>
-      )}
-    </section>
+        {state === "blocked" && (
+          <motion.div
+            key="blocked"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.25 }}
+            className="mt-4 overflow-hidden rounded-lg border-2 border-[#ef4444] bg-red-500/10 p-4"
+            role="alert"
+          >
+            <p className="font-mono text-sm font-semibold text-red-400">
+              🛑 GUARDRAIL INTERVENTION. Action Blocked. Article 14 Log Appended.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.section>
   );
 }

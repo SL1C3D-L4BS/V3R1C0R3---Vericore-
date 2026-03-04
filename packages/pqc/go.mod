@@ -1,6 +1,6 @@
 module v3r1c0r3.local/pqc
 
-go 1.22.0
+go 1.22
 
 require github.com/cloudflare/circl v1.6.3
 

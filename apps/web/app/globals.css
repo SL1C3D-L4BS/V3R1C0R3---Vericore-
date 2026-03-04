@@ -2,18 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --bg: #0a0a0a;
-  --bg-elevated: #141414;
-  --border: #262626;
-  --text: #fafafa;
-  --text-muted: #a3a3a3;
-  --accent: #3b82f6;
-  --success: #22c55e;
-  --danger: #ef4444;
+/* Cyber-Auditor typography: Inter for UI, JetBrains Mono for hashes/keys/terminal */
+@layer base {
+  :root {
+    --bg: #0a0a0a;
+    --bg-elevated: #141414;
+    --border: #262626;
+    --text: #fafafa;
+    --text-muted: #a3a3a3;
+    --accent: #3b82f6;
+    --success: #22c55e;
+    --danger: #ef4444;
+    --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Monaco, Consolas, monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+  }
+
+  /* All hashes, API keys, terminal input/output: strict monospace */
+  code,
+  kbd,
+  .font-mono,
+  [data-crypto],
+  input[type="text"].terminal-input,
+  pre {
+    font-family: var(--font-mono);
+  }
 }
 
-body {
-  background: var(--bg);
-  color: var(--text);
+@keyframes dataFloorTranslate {
+  0% { transform: translate(0, 0); }
+  100% { transform: translate(48px, 48px); }
 }
