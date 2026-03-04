@@ -143,6 +143,8 @@ func (r *mmrFlightRecorder) processBatch(batch []appendRequest) {
 				Hash:         leafHash,
 				PQCSignature: event.PQCSignature,
 				PQCPublicKey: event.PQCPublicKey,
+				ContextHash:  event.ContextHash,
+				ParentHash:   event.ParentHash,
 			}
 			nextIndex++
 

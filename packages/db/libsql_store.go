@@ -123,19 +123,23 @@ func (t *libsqlTx) SaveLeaf(ctx context.Context, leaf flightrecorder.MMRLeaf) er
 		pqcPubHex = hex.EncodeToString(leaf.PQCPublicKey)
 	}
 	_, err := t.tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO mmr_leaves (id, mmr_index, event_id, hash, tenant_id, pqc_signature, pqc_public_key) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		leaf.ID, leaf.Index, leaf.EventID, leaf.Hash, tenantID, pqcSigHex, pqcPubHex)
+		`INSERT OR REPLACE INTO mmr_leaves (id, mmr_index, event_id, hash, tenant_id, pqc_signature, pqc_public_key, context_hash, parent_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		leaf.ID, leaf.Index, leaf.EventID, leaf.Hash, tenantID, pqcSigHex, pqcPubHex, leaf.ContextHash, nullEmpty(leaf.ParentHash))
 	return err
 }
 
 func (t *libsqlTx) GetLeaf(ctx context.Context, id string) (flightrecorder.MMRLeaf, error) {
 	var leaf flightrecorder.MMRLeaf
 	var pqcSigHex, pqcPubHex sql.NullString
+	var parentHash sql.NullString
 	err := t.tx.QueryRowContext(ctx,
-		`SELECT id, mmr_index, event_id, hash, tenant_id, pqc_signature, pqc_public_key FROM mmr_leaves WHERE id = ?`,
-		id).Scan(&leaf.ID, &leaf.Index, &leaf.EventID, &leaf.Hash, &leaf.TenantID, &pqcSigHex, &pqcPubHex)
+		`SELECT id, mmr_index, event_id, hash, tenant_id, pqc_signature, pqc_public_key, context_hash, parent_hash FROM mmr_leaves WHERE id = ?`,
+		id).Scan(&leaf.ID, &leaf.Index, &leaf.EventID, &leaf.Hash, &leaf.TenantID, &pqcSigHex, &pqcPubHex, &leaf.ContextHash, &parentHash)
 	if err != nil {
 		return leaf, err
+	}
+	if parentHash.Valid {
+		leaf.ParentHash = parentHash.String
 	}
 	if pqcSigHex.Valid && pqcSigHex.String != "" {
 		leaf.PQCSignature, _ = hex.DecodeString(pqcSigHex.String)
@@ -220,5 +224,64 @@ func ensureMMRSchema(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	// Migration 009: MCP context hash for deep provenance.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE mmr_leaves ADD COLUMN context_hash TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	// Migration 010: Causal swarm DAG lineage.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE mmr_leaves ADD COLUMN parent_hash TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_mmr_leaves_parent_hash ON mmr_leaves(parent_hash)`); err != nil {
+		return err
+	}
 	return nil
+}
+
+func nullEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// CausalLineageNode is one node in the causal DAG lineage (root + downstream leaves).
+type CausalLineageNode struct {
+	EventID string // audit event ID
+	HashHex string // hex-encoded leaf hash (action hash)
+}
+
+// GetCausalLineage returns the leaf with the given root hash and all downstream leaves
+// (where parent_hash points back up the chain) for the tenant. rootHash is hex-encoded
+// (or leaf id); tenantID restricts results to that tenant.
+func (s *LibsqlStore) GetCausalLineage(ctx context.Context, rootHash, tenantID string) ([]CausalLineageNode, error) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	// Recursive CTE: anchor = leaf matching rootHash (by hex(hash) or id), then all descendants via parent_hash.
+	q := `
+WITH RECURSIVE lineage(id, event_id, hash_hex, parent_hash, tenant_id) AS (
+  SELECT id, event_id, hex(hash), parent_hash, tenant_id FROM mmr_leaves
+  WHERE tenant_id = ? AND (hex(hash) = ? OR id = ?)
+  UNION ALL
+  SELECT m.id, m.event_id, hex(m.hash), m.parent_hash, m.tenant_id FROM mmr_leaves m
+  INNER JOIN lineage l ON m.parent_hash = l.hash_hex AND m.tenant_id = l.tenant_id
+)
+SELECT event_id, hash_hex FROM lineage
+ORDER BY hash_hex
+`
+	rows, err := s.db.QueryContext(ctx, q, tenantID, rootHash, rootHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CausalLineageNode
+	for rows.Next() {
+		var n CausalLineageNode
+		if err := rows.Scan(&n.EventID, &n.HashHex); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }

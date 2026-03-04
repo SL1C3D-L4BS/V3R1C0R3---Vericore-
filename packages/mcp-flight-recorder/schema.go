@@ -56,6 +56,12 @@ type AuditEvent struct {
 	// attestation object that can be resolved by the ZKP pipeline.
 	ReceiptRef string `json:"receipt_ref"`
 
+	// ContextHash binds this event to the AI's MCP context window (SHA-256 hex of registered payload).
+	ContextHash string `json:"context_hash,omitempty"`
+
+	// ParentHash is the hex-encoded hash of the parent action in the causal DAG (multi-agent lineage).
+	ParentHash string `json:"parent_hash,omitempty"`
+
 	// PQCSignature is the post-quantum (Dilithium) signature over the canonical
 	// JSON of this event, set by the caller before Append.
 	PQCSignature []byte `json:"pqc_signature,omitempty"`
@@ -89,6 +95,12 @@ type MMRLeaf struct {
 
 	// PQCPublicKey is the public key for verifying PQCSignature.
 	PQCPublicKey []byte `json:"pqc_public_key,omitempty"`
+
+	// ContextHash binds this leaf to the AI's MCP context (included in PQC-signed payload and tree hash).
+	ContextHash string `json:"context_hash,omitempty"`
+
+	// ParentHash is the hex-encoded hash of the parent leaf in the causal DAG (multi-agent lineage).
+	ParentHash string `json:"parent_hash,omitempty"`
 }
 
 // MMRInclusionProof encodes the data required to prove that a particular

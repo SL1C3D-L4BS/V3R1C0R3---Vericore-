@@ -34,13 +34,14 @@ func TraceparentFromContext(ctx context.Context) string {
 }
 
 // ActionPayload is the expected shape of a state-changing request body when using
-// AuditMiddleware. The middleware extracts intent, tool_name, and params from
-// the request body to construct the AuditEvent. If the body is not JSON or
-// fields are missing, the corresponding AuditEvent fields are zero values.
+// AuditMiddleware. The middleware extracts intent, tool_name, params, and optional
+// context_hash from the request body to construct the AuditEvent.
 type ActionPayload struct {
-	Intent   string          `json:"intent"`
-	ToolName string          `json:"tool_name"`
-	Params   json.RawMessage `json:"params"`
+	Intent      string          `json:"intent"`
+	ToolName    string          `json:"tool_name"`
+	Params      json.RawMessage `json:"params"`
+	ContextHash string          `json:"context_hash,omitempty"`
+	ParentHash  string          `json:"parent_hash,omitempty"`
 }
 
 // AfterAppendFunc is called after a successful recorder.Append with the event ID and intent.
@@ -125,6 +126,8 @@ func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.H
 			ToolName:     payload.ToolName,
 			ParamsJSON:   paramsJSON,
 			EnvelopeHash: envelopeHash,
+			ContextHash:  payload.ContextHash,
+			ParentHash:   payload.ParentHash,
 		}
 
 		// 3b. Post-quantum sign the event (canonical JSON without PQC fields) if keys provided.

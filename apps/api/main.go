@@ -19,6 +19,7 @@ import (
 	"v3r1c0r3.local/guardrails"
 	"v3r1c0r3.local/kms"
 	"v3r1c0r3.local/mcp-flight-recorder"
+	"v3r1c0r3.local/mcp-proxy"
 	"v3r1c0r3.local/pqc"
 	"v3r1c0r3.local/telemetry"
 	"v3r1c0r3.local/webhooks"
@@ -121,14 +122,25 @@ func main() {
 
 	r.Get("/ready", readinessHandler())
 
+	// Public attestation endpoint (no auth); clients use this before sending tokens.
+	r.Get("/api/v1/enclave/attest", enclaveAttestHandler(pqcPriv))
+
 	r.Get("/api/v1/telemetry/stats", telemetryStatsHandler(primary))
 
 	keyValidator := &apiKeyValidator{db: primary}
+
+	// MCP context registration (tenant-authenticated): bind AI context to a hash for later action binding.
+	mcpContextWithAuth := auth.TenantAuthMiddleware(keyValidator, http.HandlerFunc(mcpContextHandler))
+	r.Post("/api/v1/mcp/context", func(w http.ResponseWriter, r *http.Request) { mcpContextWithAuth.ServeHTTP(w, r) })
 	// Tenant auth then audit: API key required, then integrity boundary and guardrail.
 	actionHandler := http.HandlerFunc(agentActionHandler(primary, replica, recorder, validator, webhookDispatcher, kmsProvider))
 	audited := flightrecorder.AuditMiddleware(recorder, defaultAgentID, actionHandler, afterAppend, pqcPriv, pqcPub)
 	actionWithAuth := auth.TenantAuthMiddleware(keyValidator, audited)
 	r.Post("/api/v1/agent/action", func(w http.ResponseWriter, r *http.Request) { actionWithAuth.ServeHTTP(w, r) })
+
+	// Swarm lineage: causal DAG blast radius (tenant-authenticated).
+	lineageWithAuth := auth.TenantAuthMiddleware(keyValidator, swarmLineageHandler(store, primary))
+	r.Get("/api/v1/swarm/lineage/{hash}", func(w http.ResponseWriter, r *http.Request) { lineageWithAuth.ServeHTTP(w, r) })
 
 	// Developer portal: list and create API keys (requires tenant auth).
 	portalKeysHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,14 +216,16 @@ func readinessHandler() http.HandlerFunc {
 }
 
 // actionPayload is the body for POST /api/v1/agent/action: ApprovalDecision (guardrail)
-// plus record_id/expected_state for RYOW.
+// plus record_id/expected_state for RYOW and optional context_hash/parent_hash for MCP provenance and causal DAG.
 type actionPayload struct {
-	ActionID       string `json:"action_id"`
-	Decision       string `json:"decision"`
-	Reasoning      string `json:"reasoning"`
-	FIDOSignature  []byte `json:"fido_signature"`
-	RecordID       string `json:"record_id"`
-	ExpectedState  string `json:"expected_state"`
+	ActionID      string `json:"action_id"`
+	Decision      string `json:"decision"`
+	Reasoning     string `json:"reasoning"`
+	FIDOSignature []byte `json:"fido_signature"`
+	RecordID      string `json:"record_id"`
+	ExpectedState string `json:"expected_state"`
+	ContextHash   string `json:"context_hash,omitempty"`
+	ParentHash    string `json:"parent_hash,omitempty"`
 }
 
 func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.FlightRecorder, validator guardrails.Validator, webhookDispatcher *webhooks.Dispatcher, kmsProvider kms.Provider) http.HandlerFunc {
@@ -260,6 +274,10 @@ func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.Flight
 		var payload actionPayload
 		if err := json.Unmarshal(bodyBytes, &payload); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if payload.ContextHash != "" && !mcpproxy.ValidateContext(payload.ContextHash) {
+			http.Error(w, "Invalid or expired context_hash", http.StatusBadRequest)
 			return
 		}
 		if payload.RecordID == "" {
