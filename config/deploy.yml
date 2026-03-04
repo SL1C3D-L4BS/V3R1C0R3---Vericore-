@@ -26,6 +26,12 @@ servers:
     hosts:
       - 10.0.0.1
     traefik: true
+    env:
+      clear:
+        LIBSQL_PRIMARY_URL: ""   # set via .env or kamal env push for replica mode
+      secret:
+        - LIBSQL_AUTH_TOKEN
+        - VERICORE_MASTER_KEY
 
 traefik:
   image: traefik:v2.10

@@ -3,9 +3,22 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"strings"
+	"time"
 
+	"github.com/tursodatabase/go-libsql"
+	_ "modernc.org/sqlite"
 	"v3r1c0r3.local/mcp-flight-recorder"
 )
+
+// StoreConfig configures LibSQL store: local SQLite or embedded replica syncing to a primary.
+type StoreConfig struct {
+	DBPath       string        // path to local DB file (e.g. "file:primary.db" or "/data/replica.db")
+	PrimaryURL   string        // if non-empty, use go-libsql embedded replica syncing to this URL
+	AuthToken    string        // auth token for primary (replica mode only)
+	SyncInterval time.Duration // sync interval for embedded replica (e.g. 5*time.Second)
+}
 
 // LibsqlStore implements flightrecorder.Store using a LibSQL/SQLite *sql.DB
 // (typically the primary/write pool). It uses BEGIN IMMEDIATE for ACID
@@ -14,16 +27,64 @@ type LibsqlStore struct {
 	db *sql.DB
 }
 
-// NewLibsqlStore returns a Store that uses the given DB for all MMR reads/writes.
-// The supplied db is the write pool: we serialize writes to avoid SQLITE_BUSY under
-// concurrency by limiting the pool to a single connection.
-func NewLibsqlStore(db *sql.DB) (*LibsqlStore, error) {
+// NewLibsqlStore opens a DB from cfg and returns a Store plus the *sql.DB for use as primary/replica.
+// Local mode: PrimaryURL empty — standard local SQLite with WAL, synchronous=NORMAL, foreign_keys=ON.
+// Replica mode: PrimaryURL set — embedded replica via go-libsql (local file, syncs to PrimaryURL).
+// The connection pool is set to MaxOpenConns(1) to avoid SQLITE_BUSY on local replica writes.
+func NewLibsqlStore(cfg StoreConfig) (*LibsqlStore, *sql.DB, error) {
+	db, err := openDB(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if err := ensureMMRSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return &LibsqlStore{db: db}, db, nil
+}
+
+// openDB opens either a local SQLite connection or a go-libsql embedded replica.
+func openDB(cfg StoreConfig) (*sql.DB, error) {
+	if cfg.PrimaryURL == "" {
+		return openLocalSQLite(cfg.DBPath)
+	}
+	return openEmbeddedReplica(cfg)
+}
+
+func openLocalSQLite(dbPath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
 		return nil, err
 	}
-	return &LibsqlStore{db: db}, nil
+	ctx := context.Background()
+	for _, pragma := range []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA foreign_keys=ON`,
+	} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	return db, nil
+}
+
+func openEmbeddedReplica(cfg StoreConfig) (*sql.DB, error) {
+	opts := []libsql.Option{}
+	if cfg.AuthToken != "" {
+		opts = append(opts, libsql.WithAuthToken(cfg.AuthToken))
+	}
+	if cfg.SyncInterval > 0 {
+		opts = append(opts, libsql.WithSyncInterval(cfg.SyncInterval))
+	}
+	conn, err := libsql.NewEmbeddedReplicaConnector(cfg.DBPath, cfg.PrimaryURL, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return sql.OpenDB(conn), nil
 }
 
 // RunInTx runs fn inside a single ACID transaction (BEGIN IMMEDIATE).
@@ -53,18 +114,36 @@ func (t *libsqlTx) SaveLeaf(ctx context.Context, leaf flightrecorder.MMRLeaf) er
 	if tenantID == "" {
 		tenantID = "default"
 	}
+	pqcSigHex := ""
+	if len(leaf.PQCSignature) > 0 {
+		pqcSigHex = hex.EncodeToString(leaf.PQCSignature)
+	}
+	pqcPubHex := ""
+	if len(leaf.PQCPublicKey) > 0 {
+		pqcPubHex = hex.EncodeToString(leaf.PQCPublicKey)
+	}
 	_, err := t.tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO mmr_leaves (id, mmr_index, event_id, hash, tenant_id) VALUES (?, ?, ?, ?, ?)`,
-		leaf.ID, leaf.Index, leaf.EventID, leaf.Hash, tenantID)
+		`INSERT OR REPLACE INTO mmr_leaves (id, mmr_index, event_id, hash, tenant_id, pqc_signature, pqc_public_key) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		leaf.ID, leaf.Index, leaf.EventID, leaf.Hash, tenantID, pqcSigHex, pqcPubHex)
 	return err
 }
 
 func (t *libsqlTx) GetLeaf(ctx context.Context, id string) (flightrecorder.MMRLeaf, error) {
 	var leaf flightrecorder.MMRLeaf
+	var pqcSigHex, pqcPubHex sql.NullString
 	err := t.tx.QueryRowContext(ctx,
-		`SELECT id, mmr_index, event_id, hash, tenant_id FROM mmr_leaves WHERE id = ?`,
-		id).Scan(&leaf.ID, &leaf.Index, &leaf.EventID, &leaf.Hash, &leaf.TenantID)
-	return leaf, err
+		`SELECT id, mmr_index, event_id, hash, tenant_id, pqc_signature, pqc_public_key FROM mmr_leaves WHERE id = ?`,
+		id).Scan(&leaf.ID, &leaf.Index, &leaf.EventID, &leaf.Hash, &leaf.TenantID, &pqcSigHex, &pqcPubHex)
+	if err != nil {
+		return leaf, err
+	}
+	if pqcSigHex.Valid && pqcSigHex.String != "" {
+		leaf.PQCSignature, _ = hex.DecodeString(pqcSigHex.String)
+	}
+	if pqcPubHex.Valid && pqcPubHex.String != "" {
+		leaf.PQCPublicKey, _ = hex.DecodeString(pqcPubHex.String)
+	}
+	return leaf, nil
 }
 
 func (t *libsqlTx) GetPeaks(ctx context.Context) ([]flightrecorder.Peak, error) {
@@ -129,5 +208,17 @@ func ensureMMRSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO mmr_meta (k, next_index, tenant_id) VALUES ('next', 0, 'default')`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migration 008: PQC signature columns (ignore if already present).
+	for _, q := range []string{
+		`ALTER TABLE mmr_leaves ADD COLUMN pqc_signature TEXT`,
+		`ALTER TABLE mmr_leaves ADD COLUMN pqc_public_key TEXT`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }

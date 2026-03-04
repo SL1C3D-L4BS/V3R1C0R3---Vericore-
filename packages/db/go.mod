@@ -4,7 +4,9 @@ go 1.22
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.28.0
+	github.com/tursodatabase/go-libsql v0.0.0-20251219133454-43644db490ff
 	v3r1c0r3.local/mcp-flight-recorder v0.0.0
+	modernc.org/sqlite v1.29.1
 )
 
 require (

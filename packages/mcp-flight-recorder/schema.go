@@ -55,6 +55,13 @@ type AuditEvent struct {
 	// ReceiptRef is an opaque reference to a future ZKP receipt or external
 	// attestation object that can be resolved by the ZKP pipeline.
 	ReceiptRef string `json:"receipt_ref"`
+
+	// PQCSignature is the post-quantum (Dilithium) signature over the canonical
+	// JSON of this event, set by the caller before Append.
+	PQCSignature []byte `json:"pqc_signature,omitempty"`
+
+	// PQCPublicKey is the public key used to verify PQCSignature.
+	PQCPublicKey []byte `json:"pqc_public_key,omitempty"`
 }
 
 // MMRLeaf models a single leaf node in the Merkle Mountain Range backing the
@@ -76,6 +83,12 @@ type MMRLeaf struct {
 
 	// Hash is the leaf hash bytes as produced by the configured MMRHasher.
 	Hash []byte `json:"hash"`
+
+	// PQCSignature is the post-quantum signature over the AuditEvent (included in leaf hash).
+	PQCSignature []byte `json:"pqc_signature,omitempty"`
+
+	// PQCPublicKey is the public key for verifying PQCSignature.
+	PQCPublicKey []byte `json:"pqc_public_key,omitempty"`
 }
 
 // MMRInclusionProof encodes the data required to prove that a particular

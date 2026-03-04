@@ -14,32 +14,62 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	_ "modernc.org/sqlite"
 	"v3r1c0r3.local/auth"
 	"v3r1c0r3.local/db"
 	"v3r1c0r3.local/guardrails"
+	"v3r1c0r3.local/kms"
 	"v3r1c0r3.local/mcp-flight-recorder"
+	"v3r1c0r3.local/pqc"
+	"v3r1c0r3.local/telemetry"
+	"v3r1c0r3.local/webhooks"
 )
 
 const (
-	primaryDSN = "file:primary.db"
-	replicaDSN = "file:replica.db"
-	ryowTimeout = 500 * time.Millisecond
-	defaultAgentID = "api"
+	dbPathDefault     = "file:primary.db"
+	ryowTimeout       = 500 * time.Millisecond
+	defaultAgentID    = "api"
+	defaultSyncInterval = 5 * time.Second
 )
 
 func main() {
-	primary, err := sql.Open("sqlite", primaryDSN)
+	ctx := context.Background()
+	shutdown, err := telemetry.InitProvider(ctx)
 	if err != nil {
-		log.Fatalf("open primary db: %v", err)
+		log.Fatalf("telemetry init: %v", err)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+
+	dbPath := os.Getenv("LIBSQL_DB_PATH")
+	if dbPath == "" {
+		dbPath = dbPathDefault
+	}
+	primaryURL := os.Getenv("LIBSQL_PRIMARY_URL")
+	authToken := os.Getenv("LIBSQL_AUTH_TOKEN")
+	syncInterval := defaultSyncInterval
+	if d := os.Getenv("LIBSQL_SYNC_INTERVAL"); d != "" {
+		if parsed, err := time.ParseDuration(d); err == nil && parsed > 0 {
+			syncInterval = parsed
+		}
+	}
+
+	storeConfig := db.StoreConfig{
+		DBPath:        dbPath,
+		PrimaryURL:   primaryURL,
+		AuthToken:    authToken,
+		SyncInterval: syncInterval,
+	}
+	store, primary, err := db.NewLibsqlStore(storeConfig)
+	if err != nil {
+		log.Fatalf("new libsql store: %v", err)
 	}
 	defer primary.Close()
 
-	replica, err := sql.Open("sqlite", replicaDSN)
-	if err != nil {
-		log.Fatalf("open replica db: %v", err)
-	}
-	defer replica.Close()
+	// Single DB for both write path and RYOW; replica mode uses embedded replica syncing to primary URL.
+	replica := primary
 
 	if err := EnsureAuditEventIntentsTable(context.Background(), primary); err != nil {
 		log.Fatalf("ensure audit_event_intents: %v", err)
@@ -50,11 +80,31 @@ func main() {
 	if err := EnsureFinopsTables(context.Background(), primary); err != nil {
 		log.Fatalf("ensure finops tables: %v", err)
 	}
-
-	store, err := db.NewLibsqlStore(primary)
-	if err != nil {
-		log.Fatalf("new libsql store: %v", err)
+	if err := EnsureWebhookEndpointsTable(context.Background(), primary); err != nil {
+		log.Fatalf("ensure webhook endpoints table: %v", err)
 	}
+
+	masterKeyHex := os.Getenv("VERICORE_MASTER_KEY")
+	if masterKeyHex == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			log.Fatalf("failed to generate ephemeral KMS key: %v", err)
+		}
+		masterKeyHex = hex.EncodeToString(b)
+		log.Printf("WARNING: Using ephemeral KMS key. Webhook secrets will be lost on restart.")
+	}
+	kmsProvider, err := kms.NewAESGCMProvider(masterKeyHex)
+	if err != nil {
+		log.Fatalf("invalid VERICORE_MASTER_KEY: %v", err)
+	}
+
+	webhookDispatcher := webhooks.NewDispatcher(1000)
+
+	pqcPub, pqcPriv, err := pqc.GenerateKeypair()
+	if err != nil {
+		log.Fatalf("pqc keypair: %v", err)
+	}
+	log.Printf("WARNING: Using ephemeral PQC keypair. Leaf signatures are not durable across restarts.")
 
 	recorder := flightrecorder.NewFlightRecorder(nil, store)
 	validator := guardrails.NewStrictSchemaValidator()
@@ -64,6 +114,7 @@ func main() {
 	}
 
 	r := chi.NewRouter()
+	r.Use(OTelMiddleware)
 
 	// L7 Route Health Injection: strict, stateless health that pings the DB write pool.
 	r.Get("/health", healthHandler(primary))
@@ -74,8 +125,8 @@ func main() {
 
 	keyValidator := &apiKeyValidator{db: primary}
 	// Tenant auth then audit: API key required, then integrity boundary and guardrail.
-	actionHandler := http.HandlerFunc(agentActionHandler(primary, replica, recorder, validator))
-	audited := flightrecorder.AuditMiddleware(recorder, defaultAgentID, actionHandler, afterAppend)
+	actionHandler := http.HandlerFunc(agentActionHandler(primary, replica, recorder, validator, webhookDispatcher, kmsProvider))
+	audited := flightrecorder.AuditMiddleware(recorder, defaultAgentID, actionHandler, afterAppend, pqcPriv, pqcPub)
 	actionWithAuth := auth.TenantAuthMiddleware(keyValidator, audited)
 	r.Post("/api/v1/agent/action", func(w http.ResponseWriter, r *http.Request) { actionWithAuth.ServeHTTP(w, r) })
 
@@ -163,7 +214,7 @@ type actionPayload struct {
 	ExpectedState  string `json:"expected_state"`
 }
 
-func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.FlightRecorder, validator guardrails.Validator) http.HandlerFunc {
+func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.FlightRecorder, validator guardrails.Validator, webhookDispatcher *webhooks.Dispatcher, kmsProvider kms.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -235,7 +286,7 @@ func agentActionHandler(primary, replica *sql.DB, recorder flightrecorder.Flight
 		}
 		// CFO FinOps: settle high-stakes transfer when expected_state is CFO_APPROVAL.
 		if payload.ExpectedState == "CFO_APPROVAL" {
-			if settleErr := SettleTransferByVerificationQueueID(ctx, primary, payload.RecordID); settleErr != nil {
+			if settleErr := SettleTransferByVerificationQueueID(ctx, primary, payload.RecordID, webhookDispatcher, kmsProvider); settleErr != nil {
 				log.Printf("finops settle after CFO_APPROVAL: %v", settleErr)
 			}
 		}

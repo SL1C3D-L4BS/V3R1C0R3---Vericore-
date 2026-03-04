@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"v3r1c0r3.local/auth"
+	"v3r1c0r3.local/pqc"
 )
 
 // W3C Trace Context: https://www.w3.org/TR/trace-context/#traceparent-header
@@ -62,7 +63,11 @@ type AfterAppendFunc func(ctx context.Context, eventID, intent string)
 // defaultAgentID is used.
 //
 // If afterAppend is non-nil, it is called after each successful Append with (ctx, event.ID, event.Intent).
-func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.Handler, afterAppend AfterAppendFunc) http.Handler {
+//
+// If pqcPrivateKey and pqcPublicKey are both non-nil, the event is signed with the post-quantum
+// key before Append: canonical event JSON (without PQC fields) is signed, then PQCSignature and
+// PQCPublicKey are set on the event so the leaf hash binds the signature.
+func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.Handler, afterAppend AfterAppendFunc, pqcPrivateKey, pqcPublicKey []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 1. Extract traceparent and inject into context.
 		traceparent := r.Header.Get(traceparentHeader)
@@ -120,6 +125,17 @@ func AuditMiddleware(recorder FlightRecorder, defaultAgentID string, next http.H
 			ToolName:     payload.ToolName,
 			ParamsJSON:   paramsJSON,
 			EnvelopeHash: envelopeHash,
+		}
+
+		// 3b. Post-quantum sign the event (canonical JSON without PQC fields) if keys provided.
+		if len(pqcPrivateKey) > 0 && len(pqcPublicKey) > 0 {
+			eventForSigning := event
+			eventForSigning.PQCSignature = nil
+			eventForSigning.PQCPublicKey = nil
+			eventJSON, _ := json.Marshal(eventForSigning)
+			sig := pqc.Sign(pqcPrivateKey, eventJSON)
+			event.PQCSignature = sig
+			event.PQCPublicKey = pqcPublicKey
 		}
 
 		// 4. Append to MMR; abort request on failure.

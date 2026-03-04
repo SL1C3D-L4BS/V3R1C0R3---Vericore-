@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // appendRequest is sent by Append and processed by the batch worker.
@@ -108,6 +111,11 @@ func (r *mmrFlightRecorder) batchWorker() {
 // Replies to each request's resultCh with the leaf or error.
 func (r *mmrFlightRecorder) processBatch(batch []appendRequest) {
 	ctx := context.Background()
+	tracer := otel.Tracer("mcp-flight-recorder")
+	ctx, span := tracer.Start(ctx, "mmr.process_batch")
+	defer span.End()
+	span.SetAttributes(attribute.Int("batch.size", len(batch)))
+
 	results := make([]appendResult, len(batch))
 
 	err := r.store.RunInTx(ctx, func(ctx context.Context, tx StoreTx) error {
@@ -128,11 +136,13 @@ func (r *mmrFlightRecorder) processBatch(batch []appendRequest) {
 				return err
 			}
 			localLeaf := MMRLeaf{
-				ID:       event.ID,
-				Index:    nextIndex,
-				TenantID: event.TenantID,
-				EventID:  event.ID,
-				Hash:     leafHash,
+				ID:           event.ID,
+				Index:        nextIndex,
+				TenantID:     event.TenantID,
+				EventID:      event.ID,
+				Hash:         leafHash,
+				PQCSignature: event.PQCSignature,
+				PQCPublicKey: event.PQCPublicKey,
 			}
 			nextIndex++
 

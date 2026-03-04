@@ -1,4 +1,4 @@
-go 1.22
+go 1.22.0
 
 use (
 	.
@@ -6,7 +6,11 @@ use (
 	./packages/auth
 	./packages/db
 	./packages/guardrails
+	./packages/kms
 	./packages/mcp-flight-recorder
+	./packages/pqc
+	./packages/telemetry
+	./packages/webhooks
 	./packages/zkp
 	./scripts/load_test
 )

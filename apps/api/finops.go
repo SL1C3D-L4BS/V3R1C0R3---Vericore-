@@ -12,8 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"v3r1c0r3.local/auth"
+	"v3r1c0r3.local/kms"
 	"v3r1c0r3.local/mcp-flight-recorder"
+	"v3r1c0r3.local/webhooks"
 )
 
 const (
@@ -69,6 +73,21 @@ func EnsureFinopsTables(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `ALTER TABLE finops_transfers ADD COLUMN verification_queue_id INTEGER`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
+	return nil
+}
+
+// EnsureWebhookEndpointsTable creates tenant_webhooks if it does not exist (migration 007).
+func EnsureWebhookEndpointsTable(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tenant_webhooks (
+		id          TEXT PRIMARY KEY,
+		tenant_id   TEXT NOT NULL,
+		endpoint_url TEXT NOT NULL,
+		secret_key  TEXT NOT NULL
+	)`)
+	if err != nil {
+		return err
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tenant_webhooks_tenant_id ON tenant_webhooks (tenant_id)`)
 	return nil
 }
 
@@ -276,10 +295,26 @@ type finopsAccountRow struct {
 	Currency     string `json:"currency"`
 }
 
+// WebhookDispatcher is used to enqueue events after settlement. May be nil to skip webhooks.
+type WebhookDispatcher interface {
+	Enqueue(ev webhooks.WebhookEvent)
+}
+
+// WebhookSecretDecrypter is used to decrypt stored webhook secrets before use. May be nil (treat as plaintext).
+type WebhookSecretDecrypter interface {
+	Decrypt(ciphertext []byte) ([]byte, error)
+}
+
 // SettleTransferByVerificationQueueID settles a pending_approval transfer after CFO FIDO2 approval.
 // It updates verification_queue state, moves balances, and sets transfer status to executed.
+// If the tenant has a webhook endpoint, a WebhookEvent with the transfer data is enqueued to dispatcher.
+// The secret_key from tenant_webhooks is decrypted via kmsProvider before being passed to the webhook (envelope encryption).
 // Call from agent/action when expected_state is CFO_APPROVAL.
-func SettleTransferByVerificationQueueID(ctx context.Context, primary *sql.DB, verificationQueueID string) error {
+func SettleTransferByVerificationQueueID(ctx context.Context, primary *sql.DB, verificationQueueID string, dispatcher WebhookDispatcher, kmsProvider WebhookSecretDecrypter) error {
+	tracer := otel.Tracer("finops")
+	ctx, span := tracer.Start(ctx, "finops.settle_transfer")
+	defer span.End()
+
 	var transferID, tenantID, fromAccount, toAccount string
 	var amountCents int64
 	err := primary.QueryRowContext(ctx,
@@ -291,6 +326,10 @@ func SettleTransferByVerificationQueueID(ctx context.Context, primary *sql.DB, v
 	if err != nil {
 		return err
 	}
+	span.SetAttributes(
+		attribute.String("transfer_id", transferID),
+		attribute.Int64("amount_cents", amountCents),
+	)
 	tx, err := primary.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -324,7 +363,62 @@ func SettleTransferByVerificationQueueID(ctx context.Context, primary *sql.DB, v
 		`UPDATE finops_transfers SET status = ? WHERE id = ?`, statusExecuted, transferID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Notify tenant webhook if configured (after DB is committed). Decrypt secret_key before use.
+	if dispatcher != nil {
+		var endpointURL, secretKeyStored string
+		err := primary.QueryRowContext(ctx,
+			`SELECT endpoint_url, secret_key FROM tenant_webhooks WHERE tenant_id = ? LIMIT 1`,
+			tenantID).Scan(&endpointURL, &secretKeyStored)
+		if err == nil && endpointURL != "" {
+			plainSecret := secretKeyStored
+			if kmsProvider != nil {
+				ct, decErr := hex.DecodeString(secretKeyStored)
+				if decErr == nil {
+					plain, openErr := kmsProvider.Decrypt(ct)
+					if openErr == nil {
+						plainSecret = string(plain)
+					}
+				}
+			}
+			payload, _ := json.Marshal(map[string]interface{}{
+				"event":            "finops_transfer_executed",
+				"transfer_id":      transferID,
+				"tenant_id":       tenantID,
+				"from_account":   fromAccount,
+				"to_account":      toAccount,
+				"amount_cents":   amountCents,
+				"status":         statusExecuted,
+			})
+			dispatcher.Enqueue(webhooks.WebhookEvent{
+				EndpointURL:  endpointURL,
+				Payload:      payload,
+				TenantSecret: plainSecret,
+			})
+		}
+	}
+	return nil
+}
+
+// RegisterTenantWebhook inserts a webhook endpoint for a tenant. plainSecret is encrypted with kmsProvider before storage.
+func RegisterTenantWebhook(ctx context.Context, db *sql.DB, kmsProvider kms.Provider, id, tenantID, endpointURL, plainSecret string) error {
+	var secretKeyStored string
+	if kmsProvider != nil {
+		ct, err := kmsProvider.Encrypt([]byte(plainSecret))
+		if err != nil {
+			return err
+		}
+		secretKeyStored = hex.EncodeToString(ct)
+	} else {
+		secretKeyStored = plainSecret
+	}
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO tenant_webhooks (id, tenant_id, endpoint_url, secret_key) VALUES (?, ?, ?, ?)`,
+		id, tenantID, endpointURL, secretKeyStored)
+	return err
 }
 
 // finopsAccountsHandler returns all finops_accounts for the authenticated tenant.
